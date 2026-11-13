@@ -1,6 +1,5 @@
-#define _GNU_SOURCE  // strcasestr
-#include <ctype.h>
 #include "opds_app.h"
+#include "filename.h"
 #include <curl/curl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -100,52 +99,7 @@ static size_t HeaderCallback(char *buffer, size_t size, size_t nitems, void *use
     }
 
     // Parse the NUL-terminated copy: curl's header buffer is not terminated.
-    if (filename && strncasecmp(clean_buf, "Content-Disposition:", 20) == 0) {
-        // Prefer filename*=UTF-8''<percent-encoded> (RFC 6266/5987): some servers
-        // send only this form, and it carries the exact name.
-        char *ext = strcasestr(clean_buf, "filename*=");
-        if (ext) {
-            char *p = ext + 10;
-            char *q = strstr(p, "''");          // skip charset'language'
-            if (q) {
-                p = q + 2;
-                int i = 0;
-                while (*p && *p != ';' && *p != ' ' && i < 255) {
-                    if (*p == '%' && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2])) {
-                        char hex[3] = { p[1], p[2], 0 };
-                        filename[i++] = (char)strtol(hex, NULL, 16);
-                        p += 3;
-                    } else {
-                        filename[i++] = *p++;
-                    }
-                }
-                filename[i] = '\0';
-                if (i > 0) return numbytes;
-            }
-        }
-        char *ptr = strcasestr(clean_buf, "filename=");
-        if (ptr) {
-            ptr += 9; 
-            if (*ptr == '"') {
-                ptr++; 
-                char *end = strchr(ptr, '"');
-                if (end) {
-                    int len = end - ptr;
-                    if (len > 255) len = 255;
-                    strncpy(filename, ptr, len);
-                    filename[len] = '\0';
-                }
-            } 
-            else {
-                int i = 0;
-                while (ptr[i] && ptr[i] != ' ' && ptr[i] != ';' && ptr[i] != '\r' && ptr[i] != '\n' && i < 255) {
-                    filename[i] = ptr[i]; 
-                    i++;
-                }
-                filename[i] = '\0';
-            }
-        }
-    }
+    if (filename) ParseContentDisposition(clean_buf, filename, 256);
     return numbytes;
 }
 

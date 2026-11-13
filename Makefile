@@ -5,7 +5,7 @@ SYSROOT = $(SDK_PATH)/arm-obreey-linux-gnueabi/sysroot
 CC = $(SDK_PATH)/bin/arm-obreey-linux-gnueabi-gcc
 
 APP_NAME = OPDSClient.app
-SRC = main.c network.c parser.c ui.c
+SRC = main.c network.c parser.c ui.c filename.c
 OBJ = $(SRC:.c=.o)
 
 # LDFLAGS: Changed -lft2 to -lfreetype
@@ -28,3 +28,18 @@ $(APP_NAME): $(OBJ)
 
 clean:
 	rm -f $(OBJ) $(APP_NAME)
+	rm -rf build
+
+# Host-side tests for the pure-C filename logic (no SDK needed).
+# CI also runs them with HOST_CC="cc -fsanitize=address,undefined ...".
+HOST_CC ?= cc
+HOST_CFLAGS ?= -std=gnu11 -Wall -Wextra -O1 -g
+
+test: build/test_filename
+	./build/test_filename
+
+build/test_filename: tests/test_filename.c filename.c filename.h
+	mkdir -p build
+	$(HOST_CC) $(HOST_CFLAGS) -o $@ tests/test_filename.c filename.c
+
+.PHONY: all clean test
