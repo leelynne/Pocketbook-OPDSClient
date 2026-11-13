@@ -1,0 +1,121 @@
+name: CI
+
+# Fork-only CI (not intended for upstream). Modeled on leelynne/abs-pocketbook.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Public PocketBook SDK 6.3.0 (B288) toolchain the Makefile expects (/SDK/usr).
+  # Pinned by digest so a re-pushed tag can't change what we build with.
+  SDK_IMAGE: 5keeve/pocketbook-sdk@sha256:e9849068ae722147ec7e3db455f9e3b90317d3584e17be57df984c4f5cd693b4
+
+jobs:
+  # ---------------------------------------------------------------- fast ---
+  # filename.c has no InkView/curl/libxml2 dependency, so it is tested on the host.
+  test:
+    name: Host tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: make test
+        # -Werror in CI only: a new compiler warning should block a PR without
+        # blocking someone's local build.
+        run: make test HOST_CC="cc -Werror"
+
+  sanitizers:
+    name: ASan + UBSan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Tests under sanitizers
+        # filename.c parses server-controlled headers and feed data into
+        # filesystem paths -- where a memory bug would bite.
+        run: |
+          make test HOST_CC="cc -fsanitize=address,undefined \
+            -fno-sanitize-recover=all -fno-omit-frame-pointer -g"
+
+  analyze:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: cppcheck
+        run: |
+          cppcheck --error-exitcode=1 --inline-suppr \
+            --enable=warning,performance,portability \
+            --suppress=missingIncludeSystem \
+            filename.c tests
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        # opds_client.cfg is a template; on a device it holds OPDS credentials,
+        # so a filled-in copy must never be committed.
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ----------------------------------------------------------- needs SDK ---
+  build:
+    name: Cross-compile (ARM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build
+        # `docker run`, not a job `container:`: the SDK image is Debian 9
+        # (glibc 2.24), too old for the Node runtime that actions need inside
+        # a job container. The image's entrypoint is bash, so pass -c.
+        # Remove the committed prebuilt binary first so make can't skip the link.
+        run: |
+          rm -f OPDSClient.app
+          docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/src" -w /src \
+            "$SDK_IMAGE" -c 'make 2>&1 | tee build.log; test "${PIPESTATUS[0]}" -eq 0'
+          if grep -E "warning:|error:" build.log; then
+            echo "::error::compiler warnings in the ARM build"; exit 1
+          fi
+
+      - name: Verify the binary
+        # These checks only fail on the device otherwise, where the symptom is
+        # "the app doesn't launch" with no diagnostics.
+        run: |
+          set -eux
+          READELF=/SDK/usr/bin/arm-obreey-linux-gnueabi-readelf
+          docker run --rm -v "$PWD:/src" -w /src "$SDK_IMAGE" -c "
+            set -eu
+            $READELF -h OPDSClient.app | grep -q 'Machine:.*ARM'
+            $READELF -h OPDSClient.app | grep -q 'soft-float ABI'
+            NEEDED=\$($READELF -d OPDSClient.app | grep NEEDED)
+            for lib in libinkview.so libcurl.so libxml2.so libfreetype.so libc.so; do
+              echo \"\$NEEDED\" | grep -q \"\$lib\" || { echo \"missing \$lib\"; exit 1; }
+            done
+            echo verified"
+
+      - name: Upload binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: OPDSClient-${{ github.sha }}
+          path: OPDSClient.app
+          retention-days: 14
